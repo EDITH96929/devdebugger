@@ -9,15 +9,11 @@ import json
 from PIL import Image
 import io
 
-load_dotenv()  # Add this line!
+load_dotenv()
 
-# Initialize FastAPI app
-
-app = FastAPI(title="DevDebugger API", version="1.0.0")
 # Initialize FastAPI app
 app = FastAPI(title="DevDebugger API", version="1.0.0")
 
-# Configure CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -33,16 +29,36 @@ if not GOOGLE_API_KEY:
 
 genai.configure(api_key=GOOGLE_API_KEY)
 
-# Initialize Gemini model
-model = genai.GenerativeModel('gemini-1.5-flash')
+# Initialize model - try different model names in order of preference
+model = None
+model_names_to_try = [
+    'gemini-1.5-flash',
+    'gemini-1.5-flash-latest',
+    'gemini-pro',
+    'models/gemini-1.5-flash',
+]
 
-# Request models
+for model_name in model_names_to_try:
+    try:
+        print(f"Trying to initialize model: {model_name}")
+        model = genai.GenerativeModel(model_name)
+        # Test the model with a simple prompt
+        test_response = model.generate_content("Hello")
+        print(f"✓ Successfully initialized model: {model_name}")
+        break
+    except Exception as e:
+        print(f"✗ Failed to initialize {model_name}: {str(e)}")
+        continue
+
+if model is None:
+    raise RuntimeError("Could not initialize any Gemini model. Please check your API key and available models.")
+
+# Pydantic Models
 class ErrorAnalysisRequest(BaseModel):
     error_text: str
     project_context: Optional[str] = None
     framework: Optional[str] = None
 
-# Response model
 class DebugResponse(BaseModel):
     explanation: str
     root_cause: str
@@ -51,51 +67,21 @@ class DebugResponse(BaseModel):
     prevention_tips: str
     processing_time: float
 
-@app.get("/")
-async def root():
-    return {
-        "message": "DevDebugger API",
-        "version": "1.0.0",
-        "endpoints": {
-            "/analyze": "POST - Analyze error text",
-            "/analyze-screenshot": "POST - Analyze error from screenshot",
-            "/health": "GET - Health check"
-        }
-    }
-
-@app.get("/health")
-async def health_check():
-    return {"status": "healthy", "gemini_configured": bool(GOOGLE_API_KEY)}
-
+# Helper Functions
 def create_analysis_prompt(error_text: str, context: str = None, framework: str = None) -> str:
     """Create a structured prompt for Gemini"""
-    
     prompt = f"""You are an expert debugging assistant. Analyze the following error and provide a comprehensive solution.
 
 ERROR MESSAGE:
 {error_text}
 """
-    
     if context:
-        prompt += f"""
-PROJECT CONTEXT:
-{context}
-"""
-    
+        prompt += f"\nPROJECT CONTEXT:\n{context}\n"
     if framework:
-        prompt += f"""
-DETECTED FRAMEWORK: {framework}
-"""
-    
+        prompt += f"\nDETECTED FRAMEWORK: {framework}\n"
     prompt += """
 INSTRUCTIONS:
-1. Explain what this error means in simple, clear terms
-2. Identify the specific root cause
-3. Provide step-by-step solution (be specific and actionable)
-4. Include code fixes if applicable (with proper syntax)
-5. Suggest preventive measures for the future
-
-Format your response EXACTLY as follows:
+Format your response EXACTLY as follows, with each section on a new line:
 
 ## Error Explanation
 [Provide clear explanation in 2-3 sentences]
@@ -113,52 +99,89 @@ Format your response EXACTLY as follows:
 
 ## Prevention Tips
 [Provide 2-3 actionable tips to avoid this in future]
-
-Be concise but complete. Focus on actionable advice.
 """
-    
     return prompt
 
 def parse_gemini_response(response_text: str) -> dict:
     """Parse the structured response from Gemini"""
-    
     sections = {
-        "explanation": "",
-        "root_cause": "",
-        "solution": "",
+        "explanation": "Could not parse explanation.",
+        "root_cause": "Could not parse root cause.",
+        "solution": "Could not parse solution.",
         "code_fix": None,
-        "prevention_tips": ""
+        "prevention_tips": "Could not parse prevention tips."
     }
     
     parts = response_text.split("##")
-    
     for part in parts:
         part = part.strip()
         if part.lower().startswith("error explanation"):
-            sections["explanation"] = part.replace("Error Explanation", "").strip()
+            sections["explanation"] = part.replace("Error Explanation", "", 1).strip()
         elif part.lower().startswith("root cause"):
-            sections["root_cause"] = part.replace("Root Cause", "").strip()
+            sections["root_cause"] = part.replace("Root Cause", "", 1).strip()
         elif part.lower().startswith("solution"):
-            sections["solution"] = part.replace("Solution", "").strip()
+            sections["solution"] = part.replace("Solution", "", 1).strip()
         elif part.lower().startswith("code fix"):
-            code_part = part.replace("Code Fix", "").strip()
+            code_part = part.replace("Code Fix", "", 1).strip()
             if "```" in code_part:
-                code_blocks = code_part.split("```")
-                if len(code_blocks) >= 2:
-                    sections["code_fix"] = code_blocks[1].strip()
-            else:
-                sections["code_fix"] = code_part if "no code changes needed" not in code_part.lower() else None
+                try:
+                    code_content = code_part.split("```")[1]
+                    if '\n' in code_content:
+                        sections["code_fix"] = '\n'.join(code_content.split('\n')[1:])
+                    else:
+                        sections["code_fix"] = code_content
+                except IndexError:
+                    sections["code_fix"] = "Error parsing code block."
+            elif "no code changes needed" not in code_part.lower():
+                sections["code_fix"] = code_part
         elif part.lower().startswith("prevention"):
-            sections["prevention_tips"] = part.replace("Prevention Tips", "").replace("Prevention", "").strip()
-    
+            sections["prevention_tips"] = part.replace("Prevention Tips", "", 1).replace("Prevention", "", 1).strip()
+            
     return sections
+
+# API Endpoints
+@app.get("/")
+async def root():
+    return {
+        "message": "DevDebugger API",
+        "version": "1.0.0",
+        "status": "operational",
+        "model": model._model_name if model else "not initialized"
+    }
+
+@app.get("/health")
+async def health_check():
+    return {
+        "status": "healthy",
+        "gemini_configured": bool(GOOGLE_API_KEY),
+        "model_initialized": model is not None,
+        "model_name": model._model_name if model else None
+    }
+
+@app.get("/list-models")
+async def list_models():
+    """Debug endpoint to see available models"""
+    try:
+        models_list = []
+        for m in genai.list_models():
+            if 'generateContent' in m.supported_generation_methods:
+                models_list.append({
+                    "name": m.name,
+                    "display_name": m.display_name,
+                    "description": m.description
+                })
+        return {"available_models": models_list, "count": len(models_list)}
+    except Exception as e:
+        return {"error": str(e)}
 
 @app.post("/analyze", response_model=DebugResponse)
 async def analyze_error(request: ErrorAnalysisRequest):
-    """Analyze error text with optional project context"""
-    
+    """Analyze text error with Gemini"""
     import time
     start_time = time.time()
+    
+    if not model:
+        raise HTTPException(status_code=500, detail="Gemini model not initialized")
     
     try:
         prompt = create_analysis_prompt(
@@ -168,63 +191,76 @@ async def analyze_error(request: ErrorAnalysisRequest):
         )
         
         response = model.generate_content(prompt)
-        response_text = response.text
         
-        parsed = parse_gemini_response(response_text)
+        if not response or not response.text:
+            raise HTTPException(status_code=500, detail="Empty response from Gemini")
         
+        parsed = parse_gemini_response(response.text)
         processing_time = time.time() - start_time
         
         return DebugResponse(
-            explanation=parsed["explanation"],
-            root_cause=parsed["root_cause"],
-            solution=parsed["solution"],
-            code_fix=parsed["code_fix"],
-            prevention_tips=parsed["prevention_tips"],
+            **parsed,
             processing_time=round(processing_time, 2)
         )
-        
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error analyzing: {str(e)}")
 
 @app.post("/analyze-screenshot")
 async def analyze_screenshot(
     image: UploadFile = File(...),
-    project_context: Optional[str] = Form(None),
-    framework: Optional[str] = Form(None)
+    project_context: Optional[str] = Form(None)
 ):
     """Analyze error from screenshot using Gemini Vision"""
-    
     import time
     start_time = time.time()
     
+    if not model:
+        raise HTTPException(status_code=500, detail="Gemini model not initialized")
+    
     try:
+        # Read and process image
         image_data = await image.read()
         pil_image = Image.open(io.BytesIO(image_data))
         
-        vision_prompt = """Extract and analyze the error message from this screenshot. 
-        
+        # Create vision prompt
+        vision_prompt = """Extract and analyze the error message from this screenshot.
+
 Identify:
 1. The exact error message
 2. The technology/framework (if visible)
 3. The file/line number (if visible)
 4. Any relevant stack trace
 
-Then provide the same structured analysis as before:
+Then provide analysis in this EXACT format:
+
 ## Error Explanation
+[Clear explanation]
+
 ## Root Cause
+[Specific cause]
+
 ## Solution
+[Numbered steps]
+
 ## Code Fix
+```
+[Code or "No code changes needed"]
+```
+
 ## Prevention Tips
+[Tips to avoid this error]
 """
         
         if project_context:
             vision_prompt += f"\n\nPROJECT CONTEXT:\n{project_context}"
         
+        # Gemini 1.5 accepts images directly in the content list
         response = model.generate_content([vision_prompt, pil_image])
-        response_text = response.text
         
-        parsed = parse_gemini_response(response_text)
+        if not response or not response.text:
+            raise HTTPException(status_code=500, detail="Empty response from Gemini")
         
+        parsed = parse_gemini_response(response.text)
         processing_time = time.time() - start_time
         
         return {
@@ -238,44 +274,13 @@ Then provide the same structured analysis as before:
         }
         
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error processing screenshot: {str(e)}")
-
-@app.post("/extract-context")
-async def extract_context(file: UploadFile = File(...)):
-    """Extract project context from package.json or requirements.txt"""
-    
-    try:
-        content = await file.read()
-        text_content = content.decode('utf-8')
-        
-        filename = file.filename.lower()
-        
-        if 'package.json' in filename:
-            data = json.loads(text_content)
-            dependencies = data.get('dependencies', {})
-            dev_dependencies = data.get('devDependencies', {})
-            
-            context = f"""Framework: Node.js/JavaScript
-Dependencies: {', '.join(dependencies.keys())}
-Dev Dependencies: {', '.join(dev_dependencies.keys())}
-"""
-            return {"context": context, "framework": "Node.js/JavaScript"}
-            
-        elif 'requirements.txt' in filename:
-            lines = text_content.strip().split('\n')
-            packages = [line.split('==')[0].split('>=')[0].strip() for line in lines if line.strip()]
-            
-            context = f"""Framework: Python
-Packages: {', '.join(packages)}
-"""
-            return {"context": context, "framework": "Python"}
-            
-        else:
-            return {"context": text_content, "framework": "Unknown"}
-            
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error extracting context: {str(e)}")
+        error_detail = str(e)
+        raise HTTPException(status_code=500, detail=f"Error processing screenshot: {error_detail}")
 
 if __name__ == "__main__":
     import uvicorn
+    print("\n" + "="*50)
+    print("DevDebugger API Starting...")
+    print(f"Model initialized: {model._model_name if model else 'FAILED'}")
+    print("="*50 + "\n")
     uvicorn.run(app, host="127.0.0.1", port=8000)
