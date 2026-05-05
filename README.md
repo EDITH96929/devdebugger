@@ -139,7 +139,7 @@ Feel free to fork the repo and submit a PR.
 ## 📬 Contact
 
 * GitHub: https://github.com/EDITH96929
-* LinkedIn: https://www.linkedin.com/in/hi-world-584660288
+* LinkedIn: https://in.linkedin.com/in/sunil-kumar-swain-584660288
 
 ---
 
