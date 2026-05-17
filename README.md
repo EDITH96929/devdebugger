@@ -21,7 +21,7 @@ It leverages multimodal AI to understand issues and provide **context-aware, ins
 
 * 📂 **Multi-Input Support**
   Works with text, images, and files
-
+ 
 ---
 
 ## 🏗️ Tech Stack
